@@ -55,8 +55,32 @@ def group_words(words: list[Word], per_line: int, max_gap: float = 0.7, max_span
     return groups
 
 
+def wrap_hook(text: str, max_chars: int = 16) -> str:
+    """Two short lines at most, broken between words."""
+    words = text.split()
+    lines, cur = [], ""
+    for w in words:
+        if cur and len(cur) + 1 + len(w) > max_chars and not lines:
+            lines.append(cur)
+            cur = w
+        else:
+            cur = f"{cur} {w}".strip()
+    lines.append(cur)
+    return "\\N".join(l for l in lines if l)
+
+
+def hook_style(W: int, H: int, style: CaptionStyle, top_px: int) -> tuple[str, int]:
+    fs = max(24, int(H * 0.052 * (W / H if W > H else 1) ** 0.5))
+    pad = max(6, int(fs * 0.28))
+    line = (f"Style: Hook,{style.font},{fs},&H00FFFFFF,&H00FFFFFF,&H50101010,&H50101010,-1,0,0,0,100,100,0,0,"
+            f"3,{pad},0,8,{int(W * .08)},{int(W * .08)},{max(0, int(top_px))},1\n")
+    return line, fs
+
+
 def build_ass(words: list[Word], clip_start: float, clip_end: float, W: int, H: int,
-              style: CaptionStyle, position: float | None = None) -> str:
+              style: CaptionStyle, position: float | None = None,
+              hook: tuple[str, int, float] | None = None) -> str:
+    """hook = (text, pixels from the top, seconds shown) for the big line at the start."""
     fs = max(18, int(H * style.size * (W / H if W > H else 1) ** 0.5))
     outline = max(2, int(fs * style.outline))
     margin_v = int(H * (style.position if position is None else position))
@@ -68,7 +92,8 @@ def build_ass(words: list[Word], clip_start: float, clip_end: float, W: int, H: 
         "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
         "Alignment, MarginL, MarginR, MarginV, Encoding\n"
         f"Style: Cap,{style.font},{fs},{bgr(style.color)},{bgr(style.color)},&H00000000,&H64000000,"
-        f"-1,0,0,0,100,100,0,0,1,{outline},{max(1, outline // 3)},2,{int(W * .07)},{int(W * .07)},{margin_v},1\n\n"
+        f"-1,0,0,0,100,100,0,0,1,{outline},{max(1, outline // 3)},2,{int(W * .07)},{int(W * .07)},{margin_v},1\n"
+        + (hook_style(W, H, style, hook[1])[0] if hook and clean(hook[0], True) else "") + "\n"
         "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
     )
     local: list[Word] = []
@@ -89,4 +114,9 @@ def build_ass(words: list[Word], clip_start: float, clip_end: float, W: int, H: 
             text = " ".join(fmt_word(x.text, cur if j == i else base, base) for j, x in enumerate(g))
             pop = "{\\fscx106\\fscy106\\t(0,90,\\fscx100\\fscy100)}" if i == 0 else ""
             lines.append(f"Dialogue: 0,{ass_time(a)},{ass_time(max(b, a + 0.05))},Cap,,0,0,0,,{pop}{text}")
+    if hook and clean(hook[0], True):
+        dur = max(1.0, float(hook[2]))
+        lines.append(f"Dialogue: 1,{ass_time(0.05)},{ass_time(dur)},Hook,,0,0,0,,"
+                     f"{{\\fad(120,260)\\fscx92\\fscy92\\t(0,140,\\fscx100\\fscy100)}}{wrap_hook(clean(hook[0], True))}")
     return head + "\n".join(lines) + "\n"
+

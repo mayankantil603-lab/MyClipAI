@@ -152,3 +152,37 @@ class LiveWorker(QObject):
         except Exception as exc:
             traceback.print_exc()
             self.failed.emit(sources.friendly_error(str(exc)) or exc.__class__.__name__)
+
+
+class TaskWorker(QObject):
+    """Runs fn(cancel, progress) on a thread. progress(fraction, message)."""
+    progress = Signal(float, str)
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, fn) -> None:
+        super().__init__()
+        self.fn = fn
+        self.cancel = threading.Event()
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self.done.emit(self.fn(self.cancel, lambda f, m="": self.progress.emit(float(f), str(m))))
+        except Cancelled:
+            self.failed.emit("Cancelled")
+        except Exception as exc:
+            traceback.print_exc()
+            self.failed.emit(sources.friendly_error(str(exc)) or exc.__class__.__name__)
+
+
+def run_task(parent: QObject, fn, on_done=None, on_failed=None, on_progress=None) -> "TaskWorker":
+    w = TaskWorker(fn)
+    if on_done:
+        w.done.connect(on_done)
+    if on_failed:
+        w.failed.connect(on_failed)
+    if on_progress:
+        w.progress.connect(on_progress)
+    start(parent, w, w.done, w.failed)
+    return w

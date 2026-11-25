@@ -139,6 +139,10 @@ class Clip:
     source: str = "signals"         # signals | llm | both
     file: str = ""
     thumb: str = ""
+    visual: str = ""                # what the vision model saw on screen
+    hover: list[str] = field(default_factory=list)   # small frames for the card's hover preview
+    plan: dict = field(default_factory=dict)         # how it was rendered (see render.RenderPlan)
+    words: list = field(default_factory=list)        # caption words [[start, end, text]] in video time
 
     @property
     def duration(self) -> float:
@@ -177,7 +181,7 @@ class JobConfig:
     aspect: str = "9:16"             # 9:16 | 1:1 | 4:5 | 16:9 | Original | Custom
     custom_w: int = 1080
     custom_h: int = 1920
-    framing: str = "Auto"            # Auto | Fit | Fill | Smart
+    framing: str = "Auto"            # Auto | Fit | Fill | Smart | Facecam
     quality: str = "1080p"
     captions: str = "Bold"           # style name or "Off"
     caption_lang: str = "auto"       # auto | roman (Hinglish) | english | spoken
@@ -190,6 +194,16 @@ class JobConfig:
     use_external: bool = True        # heatmap/chat/comments
     use_scenes: bool = True
     output_dir: str = ""
+    # AI helpers (each is used only when installed in Settings -> AI helpers)
+    use_voice: bool = True           # Demucs voice cleanup before the caption pass
+    use_vision: bool = True          # a vision model rates what happens on screen
+    use_faces: bool = True           # crop follows faces, facecam detection
+    hindi_asr: bool = False          # IndicWhisper Hindi for Hindi captions
+    sharp_thumbs: bool = True        # sharpest frame + Real-ESRGAN
+    # extras
+    hook_text: bool = True           # big hook line at the top for the first seconds
+    bleep: str = "off"               # off | beep | mute
+    learn_channel: str = ""          # YouTube channel whose views tune the scoring ("" = defaults)
 
     def target_size(self, info: Optional[MediaInfo] = None) -> tuple[int, int]:
         if self.aspect == "Custom":

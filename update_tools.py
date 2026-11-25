@@ -18,7 +18,8 @@ def main() -> None:
     print("Checking for downloader updates...")
     try:
         subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--disable-pip-version-check", "-U", "yt-dlp"],
-                       timeout=120)
+                       timeout=180, stdin=subprocess.DEVNULL, capture_output=True,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except Exception:
         return
     try:

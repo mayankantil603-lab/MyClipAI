@@ -205,15 +205,19 @@ class Preset:
 BUILTIN_PRESETS = [
     Preset("Best quality", {"whisper_model": "large-v3-turbo", "device": "auto", "quality": "1080p",
                             "use_external": True, "use_scenes": True, "framing": "Smart",
-                            "use_llm": True, "caption_quality": "best"}, True),
+                            "use_llm": True, "caption_quality": "best", "use_voice": True, "use_vision": True,
+                            "use_faces": True, "sharp_thumbs": True}, True),
     Preset("Fast", {"whisper_model": "small", "device": "auto", "quality": "1080p",
                     "use_external": False, "use_scenes": False, "framing": "Fit",
-                    "use_llm": False, "caption_quality": "fast"}, True),
+                    "use_llm": False, "caption_quality": "fast", "use_voice": False, "use_vision": False,
+                    "use_faces": False, "hindi_asr": False, "sharp_thumbs": False}, True),
     Preset("Offline", {"whisper_model": "auto", "device": "auto", "use_external": False,
-                       "use_scenes": True, "framing": "Smart", "use_llm": "local", "caption_quality": "best"}, True),
+                       "use_scenes": True, "framing": "Smart", "use_llm": "local", "caption_quality": "best",
+                       "use_voice": True, "use_vision": True, "use_faces": True, "sharp_thumbs": True}, True),
 ]
 PRESET_KEYS = {"whisper_model", "device", "quality", "use_external", "use_scenes", "framing",
-               "use_llm", "aspect", "captions", "caption_lang", "caption_quality", "clip_count", "min_len", "max_len"}
+               "use_llm", "aspect", "captions", "caption_lang", "caption_quality", "clip_count", "min_len", "max_len",
+               "use_voice", "use_vision", "use_faces", "hindi_asr", "sharp_thumbs", "hook_text", "bleep"}
 
 
 class PresetStore:

@@ -113,8 +113,115 @@ def _studio(p: QPainter) -> None:
     p.drawPath(path)
 
 
+def _pause(p: QPainter) -> None:
+    p.drawLine(QPointF(9, 6), QPointF(9, 18))
+    p.drawLine(QPointF(15, 6), QPointF(15, 18))
+
+
+def _prev(p: QPainter) -> None:
+    p.drawLine(QPointF(7, 6), QPointF(7, 18))
+    path = QPainterPath(QPointF(18, 6))
+    path.lineTo(10, 12)
+    path.lineTo(18, 18)
+    path.closeSubpath()
+    p.drawPath(path)
+
+
+def _next(p: QPainter) -> None:
+    p.drawLine(QPointF(17, 6), QPointF(17, 18))
+    path = QPainterPath(QPointF(6, 6))
+    path.lineTo(14, 12)
+    path.lineTo(6, 18)
+    path.closeSubpath()
+    p.drawPath(path)
+
+
+def _scissors(p: QPainter) -> None:
+    p.drawEllipse(QPointF(7, 17), 2.6, 2.6)
+    p.drawEllipse(QPointF(17, 17), 2.6, 2.6)
+    p.drawLine(QPointF(8.8, 15.2), QPointF(17, 5))
+    p.drawLine(QPointF(15.2, 15.2), QPointF(7, 5))
+
+
+def _edit(p: QPainter) -> None:
+    path = QPainterPath(QPointF(5, 19))
+    path.lineTo(5.6, 15.4)
+    path.lineTo(15.5, 5.5)
+    path.lineTo(18.5, 8.5)
+    path.lineTo(8.6, 18.4)
+    path.closeSubpath()
+    p.drawPath(path)
+    p.drawLine(QPointF(13.5, 7.5), QPointF(16.5, 10.5))
+
+
+def _trash(p: QPainter) -> None:
+    p.drawLine(QPointF(5, 7), QPointF(19, 7))
+    p.drawLine(QPointF(10, 7), QPointF(10.5, 4.5))
+    p.drawLine(QPointF(10.5, 4.5), QPointF(13.5, 4.5))
+    p.drawLine(QPointF(13.5, 4.5), QPointF(14, 7))
+    path = QPainterPath(QPointF(6.5, 7))
+    path.lineTo(7.5, 19.5)
+    path.lineTo(16.5, 19.5)
+    path.lineTo(17.5, 7)
+    p.drawPath(path)
+
+
+def _check(p: QPainter) -> None:
+    p.drawLine(QPointF(5.5, 12.5), QPointF(10, 17))
+    p.drawLine(QPointF(10, 17), QPointF(18.5, 7.5))
+
+
+def _close(p: QPainter) -> None:
+    p.drawLine(QPointF(7, 7), QPointF(17, 17))
+    p.drawLine(QPointF(17, 7), QPointF(7, 17))
+
+
+def _volume(p: QPainter) -> None:
+    path = QPainterPath(QPointF(4.5, 9.5))
+    path.lineTo(8, 9.5)
+    path.lineTo(12.5, 5.5)
+    path.lineTo(12.5, 18.5)
+    path.lineTo(8, 14.5)
+    path.lineTo(4.5, 14.5)
+    path.closeSubpath()
+    p.drawPath(path)
+    p.drawArc(QRectF(11, 8, 7, 8), -60 * 16, 120 * 16)
+
+
+def _film(p: QPainter) -> None:
+    p.drawRoundedRect(QRectF(4, 5, 16, 14), 2.5, 2.5)
+    p.drawLine(QPointF(8, 5), QPointF(8, 19))
+    p.drawLine(QPointF(16, 5), QPointF(16, 19))
+    p.drawLine(QPointF(4, 12), QPointF(8, 12))
+    p.drawLine(QPointF(16, 12), QPointF(20, 12))
+
+
+def _search(p: QPainter) -> None:
+    p.drawEllipse(QPointF(10.5, 10.5), 5.5, 5.5)
+    p.drawLine(QPointF(14.5, 14.5), QPointF(19, 19))
+
+
+def _person(p: QPainter) -> None:
+    p.drawEllipse(QPointF(12, 9), 3.6, 3.6)
+    path = QPainterPath(QPointF(5, 19.5))
+    path.cubicTo(6, 14.5, 18, 14.5, 19, 19.5)
+    p.drawPath(path)
+
+
+def _cpu(p: QPainter) -> None:
+    p.drawRoundedRect(QRectF(7, 7, 10, 10), 2, 2)
+    for k in (9.5, 14.5):
+        p.drawLine(QPointF(k, 4), QPointF(k, 7))
+        p.drawLine(QPointF(k, 17), QPointF(k, 20))
+        p.drawLine(QPointF(4, k), QPointF(7, k))
+        p.drawLine(QPointF(17, k), QPointF(20, k))
+
+
 _DRAW = {"studio": _studio, "live": _live, "create": _create, "library": _library, "settings": _settings, "upload": _upload,
-         "play": _play, "folder": _folder, "copy": _copy, "chevron": _chevron, "down": _down, "plus": _plus}
+         "play": _play, "folder": _folder, "copy": _copy, "chevron": _chevron, "down": _down, "plus": _plus,
+         "pause": _pause, "prev": _prev, "next": _next, "scissors": _scissors, "edit": _edit, "trash": _trash,
+         "check": _check, "close": _close, "volume": _volume, "film": _film, "search": _search,
+         "person": _person, "cpu": _cpu}
 
 
 def icon(name: str, color: str = "", size: int = 18, on_color: str = "") -> QIcon:

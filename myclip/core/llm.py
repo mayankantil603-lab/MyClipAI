@@ -287,6 +287,7 @@ def review(conn: Connection, key: str, model: str, clips: list[Clip], sig: Signa
     if not clips:
         return
     items = "\n".join(f"[{i}] {c.start:.0f}-{c.end:.0f}s: {(c.text or '(no speech)')[:700]}"
+                      + (f"  | On screen: {c.visual}" if getattr(c, "visual", "") else "")
                       for i, c in enumerate(clips))
     try:
         data = parse_json(chat(conn, key, model, [

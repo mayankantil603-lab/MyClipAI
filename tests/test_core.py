@@ -525,6 +525,92 @@ def test_hindi_words_never_replaced_by_translation():
         "haar gae aao maine"
 
 
+# ---------------- v2
+
+def test_bleep_matching_and_mask():
+    from myclip.core.bleep import DEFAULT_WORDS, Matcher, apply, mask
+    m = Matcher(DEFAULT_WORDS)
+    for w in ("fuck", "Fucking!", "fuuuuck", "f***", "bc", "chutiya", "चूतिया", "madarchod"):
+        assert m.is_swear(w), w
+    for w in ("bhai", "class", "gandhi", "dickens", "assess", "grand", "मज़ा"):
+        assert not m.is_swear(w), w
+    assert mask("Fucking!") == "F******!"
+    tr = Transcript([Segment(0, 3, "", [Word(0, .3, "bhai"), Word(1.0, 1.5, "fucking"), Word(2.3, 2.6, "bc")])], "hi")
+    masked, iv = apply(tr, 0.0, 3.0, m)
+    assert [w.text for w in masked.words()] == ["bhai", "f******", "b**"] and len(iv) == 2
+
+
+def test_hindi_speech_pieces():
+    from myclip.core.hindi import drop_tails, speech_pieces
+    sr = 16000
+    rng = np.random.RandomState(0)
+    tone = lambda d: (0.3 * np.sin(2 * np.pi * 200 * np.arange(int(d * sr)) / sr)).astype(np.float32)
+    sil = lambda d: rng.normal(0, 0.003, int(d * sr)).astype(np.float32)
+    p = speech_pieces(np.concatenate([sil(.5), tone(3), sil(.6), tone(19), sil(1)]))
+    assert p and all(b - a <= 8.31 for a, b in p) and all(p[i][0] >= p[i - 1][1] for i in range(1, len(p)))
+    assert speech_pieces(sil(5)) == []
+    segs = [Segment(0, 2, "भाई ये", [Word(0, .5, "भाई"), Word(.6, 1, "ये")]),
+            Segment(1.02, 1.3, "धन्यवाद", [Word(1.02, 1.3, "धन्यवाद")])]
+    assert [s.text for s in drop_tails(segs)] == ["भाई ये"]
+
+
+def test_learning_is_bounded_and_waits_for_data():
+    import math
+    import random
+    from myclip.core import learning
+    rng = random.Random(1)
+    vids = []
+    for i in range(20):
+        parts = {"hype": rng.uniform(0, 8), "speech": rng.uniform(0, 8), "peak": rng.uniform(5, 25)}
+        vids.append({"parts": parts, "views": int(math.exp(6 + 0.4 * parts["hype"] + rng.gauss(0, .5)))})
+    w, n = learning.fit(vids)
+    assert n == 20 and w["hype"] > 1.05 and all(0.6 <= v <= 1.4 for v in w.values())
+    assert learning.fit(vids[:5]) == ({}, 5)
+
+
+def test_best_of_plan():
+    from myclip.core.compile import plan, xfade_graph
+    clips = [{"file": f"{i}.mp4", "start": i * 100, "end": i * 100 + d, "score": s, "features": {"peak_pos": .7}}
+             for i, (d, s) in enumerate([(30, 88), (45, 92), (20, 40), (60, 75), (25, 81), (35, 66), (15, 99)])]
+    p = plan(clips, 5, 60)
+    assert len(p) == 5 and sum(x["b"] - x["a"] for x in p) <= 60.01
+    assert [x["start"] for x in p] == sorted(x["start"] for x in p)
+    g, v, a = xfade_graph(3, [10, 12, 9], 1080, 1920)
+    assert "offset=21.500" in g and v == "[vx2]" and a == "[ax2]"
+
+
+def test_facecam_and_moving_crop_filters():
+    from myclip.core.faces import smooth_path, x_expr
+    from myclip.core.render import RenderPlan, caption_position, facecam_split, resolve_framing, video_filter
+    wide = MediaInfo(100, 1920, 1080, 60, True)
+    cam = [0.72, 0.68, 0.26, 0.28]
+    assert resolve_framing(JobConfig("x", framing="Facecam"), wide, 1080, 1920) == "facecam"
+    top, bot = facecam_split(1080, 1920, cam, wide)
+    assert top + bot == 1920 and 0.25 * 1920 <= top <= 0.45 * 1920
+    f = video_filter("facecam", 1080, 1920, 0.5, None, cam, wide)
+    assert "vstack=inputs=2" in f and f.endswith("[v]")
+    assert 0.1 <= caption_position("facecam", wide, 1080, 1920, 0.24, cam) < 0.7
+    path = smooth_path([0, 1, 2, 3, 4, 5], [0.5, 0.52, 0.7, 0.8, 0.8, 0.78], 6.0)
+    assert "clip(t-" in x_expr(path, 1080)
+    plan = RenderPlan(0.4, path, cam, "GG", [(1.0, 1.4)], "beep")
+    assert RenderPlan.from_dict(plan.to_dict()).to_dict() == plan.to_dict()
+
+
+def test_hook_in_ass():
+    ass = build_ass([Word(10, 10.4, "bhai")], 10, 30, 1080, 1920, CAPTION_STYLES["Bold"], 0.24,
+                    ("1v4 clutch in ranked bro", 700, 2.5))
+    assert ass.count("[V4+ Styles]") == 1 and "Style: Hook," in ass and ",Hook,," in ass
+
+
+def test_grid_sort_and_filter():
+    from myclip.ui.grid import filter_items, sort_items
+    items = [({"title": "Clutch", "start": 50, "score": 70, "hashtags": ["#valorant"]}, "/f"),
+             ({"title": "Funny fail", "start": 10, "score": 90}, "/f")]
+    assert [c["title"] for c, _ in sort_items(items, "best")] == ["Funny fail", "Clutch"]
+    assert [c["title"] for c, _ in sort_items(items, "time")] == ["Funny fail", "Clutch"]
+    assert [c["title"] for c, _ in filter_items(items, "VALORANT")] == ["Clutch"]
+
+
 if __name__ == "__main__":
     n = 0
     for name, fn in list(globals().items()):

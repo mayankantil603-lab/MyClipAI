@@ -12,15 +12,17 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QFrame, QGr
                                QScrollArea, QSpinBox, QStackedWidget, QVBoxLayout, QWidget)
 
 from .. import APP_NAME, __version__
-from ..core import engine, sources
+from ..core import editing, engine, helpers, sources
 from ..core.gpu import cuda_info
 from ..core.models import CAPTION_STYLES, JobConfig
 from ..core.paths import config_dir, shorts_dir
 from ..core.store import ConnectionStore, PresetStore, resolve_llm_for_preset
 from ..core.subtitles import MODES as SUB_MODES
 from ..core.transcribe import WHISPER_CHOICES
-from . import theme, workers
+from . import anim, theme, workers
 from .dialogs import ConnectionDialog, ask_text
+from .grid import ClipGrid
+from .preview import CaptionPreview
 from .icons import app_icon, icon
 from .widgets import (Chips, ClipCard, DropZone, Field, Steps, Toast, button, dot_text, hline, label, open_path)
 
@@ -38,7 +40,14 @@ ASPECT_OPTS = [("9:16", "9:16", "Shorts, Reels, TikTok"), ("1:1", "1:1"), ("4:5"
 FRAMING = [("Auto", "Auto", "Fit for wide gameplay, fill otherwise"),
            ("Fit", "Fit", "Whole frame over a blurred background"),
            ("Fill", "Fill", "Crop to fill, centred"),
-           ("Smart", "Follow action", "Crop that follows motion in the clip")]
+           ("Smart", "Follow action", "Crop that follows the face or the motion in the clip"),
+           ("Facecam", "Facecam", "Your facecam on top, gameplay below")]
+ONOFF = [(True, "On"), (False, "Off")]
+HELPER_TOGGLES = [("use_voice", "voice", "Voice cleanup", "Removes game sound and music before captions"),
+                  ("use_vision", "vision", "Vision", "A vision model watches the best moments"),
+                  ("use_faces", "faces", "Face tracking", "Crop follows faces; finds your facecam"),
+                  ("hindi_asr", "hindi", "Hindi model for captions", "IndicWhisper for Hindi speech"),
+                  ("sharp_thumbs", "upscale", "Sharp thumbnails", "Sharpest frame, upscaled")]
 
 
 def _clock(sec: float) -> str:
@@ -71,11 +80,21 @@ def _swatch(hx: str):
 
 
 def page_container() -> tuple[QWidget, QVBoxLayout]:
+    """A page whose content stays in a centered column on wide windows."""
     w = QWidget()
     w.setObjectName("page")
-    lay = QVBoxLayout(w)
-    lay.setContentsMargins(48, 38, 48, 48)
+    outer = QHBoxLayout(w)
+    outer.setContentsMargins(40, 36, 40, 48)
+    outer.setSpacing(0)
+    col = QWidget()
+    col.setObjectName("pagecol")
+    col.setMaximumWidth(theme.CONTENT_MAX)
+    lay = QVBoxLayout(col)
+    lay.setContentsMargins(0, 0, 0, 0)
     lay.setSpacing(0)
+    outer.addStretch(1)
+    outer.addWidget(col, 100)
+    outer.addStretch(1)
     return w, lay
 
 
@@ -88,6 +107,7 @@ class MainWindow(QMainWindow):
         self.resize(1180, 820)
         self.setMinimumSize(920, 640)
         self.qs = QSettings("MyClipAI", "MyClipAI")
+        theme.REDUCE_MOTION = str(self.qs.value("reduce_motion", "false")).lower() == "true"
         self.conns = ConnectionStore(config_dir() / "connections.json")
         self.presets = PresetStore(config_dir() / "presets.json")
         self.source = ""
@@ -109,7 +129,11 @@ class MainWindow(QMainWindow):
         self.toast = Toast(self)
         from .studio import StudioPage
         self.studio = StudioPage(lambda t, ms=2600, error=False: self.toast.show_text(t, ms, error), self.conns.keys)
-        self.stack.addWidget(scroll(self.studio))
+        studio_page = QWidget(); studio_page.setObjectName("page")
+        sp = QHBoxLayout(studio_page); sp.setContentsMargins(0, 0, 0, 0); sp.setSpacing(0)
+        self.studio.setMaximumWidth(theme.CONTENT_MAX + 80)
+        sp.addStretch(1); sp.addWidget(self.studio, 100); sp.addStretch(1)
+        self.stack.addWidget(scroll(studio_page))
         self.stack.addWidget(self._settings_page())
         ClipCard.upload_handler = self._upload
 
@@ -130,11 +154,16 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(700, lambda: self.detect_local(False))
         self._detect_timer = QTimer(self, interval=60000, timeout=lambda: self.detect_local(False, quiet=True))
         self._detect_timer.start()
+        QTimer.singleShot(900, self._update_preview)
+        QTimer.singleShot(1500, self._learn_summary)
+        QTimer.singleShot(20000, lambda: self._refresh_learning(quiet=True))
+        self._learn_timer = QTimer(self, interval=6 * 3600 * 1000, timeout=lambda: self._refresh_learning(quiet=True))
+        self._learn_timer.start()
 
     # ================= sidebar =================
     def _sidebar(self) -> QWidget:
-        w = QWidget(); w.setObjectName("sidebar"); w.setFixedWidth(208)
-        v = QVBoxLayout(w); v.setContentsMargins(12, 20, 12, 16); v.setSpacing(4)
+        w = QWidget(); w.setObjectName("sidebar"); w.setFixedWidth(216)
+        v = QVBoxLayout(w); v.setContentsMargins(14, 22, 14, 18); v.setSpacing(4)
         brand = QHBoxLayout(); brand.setSpacing(9); brand.setContentsMargins(6, 0, 0, 0)
         self.brand_icon = QLabel(); self.brand_icon.setPixmap(app_icon().pixmap(22, 22)); brand.addWidget(self.brand_icon)
         brand.addWidget(label(APP_NAME, "brand")); brand.addStretch(1)
@@ -149,20 +178,26 @@ class MainWindow(QMainWindow):
             b.clicked.connect(lambda _, i=i: self._go(i))
             v.addWidget(b); self.nav.append(b)
         v.addStretch(1)
+        foot = QFrame(); foot.setObjectName("soft")
+        fl = QVBoxLayout(foot); fl.setContentsMargins(12, 10, 12, 10); fl.setSpacing(3)
         self.device_lbl = label("", "faint", wrap=True)
-        v.addWidget(self.device_lbl)
-        v.addSpacing(4)
-        v.addWidget(label(f"v{__version__}", "faint"))
+        fl.addWidget(self.device_lbl)
+        fl.addWidget(label(f"MyClip AI {__version__}", "faint"))
+        v.addWidget(foot)
         return w
 
     def _go(self, i: int) -> None:
+        changed = self.stack.currentIndex() != i
         self.stack.setCurrentIndex(i)
+        if changed:
+            anim.fade_in(self.stack.currentWidget(), 160)
         for j, b in enumerate(self.nav):
             b.setChecked(i == j)
         if i == 2:
             self._load_library()
         if i == 3 and self.studio.store.active:
             self.studio.refresh()
+            self._refresh_learning(quiet=True)
 
     # ================= create =================
     def _create_page(self) -> QWidget:
@@ -170,11 +205,12 @@ class MainWindow(QMainWindow):
         head = QHBoxLayout()
         head.addWidget(label("New clips", "h1")); head.addStretch(1)
         v.addLayout(head)
-        v.addSpacing(4)
-        v.addWidget(label("Add a long video. MyClip finds the best moments and cuts them into shorts.", "muted"))
-        v.addSpacing(22)
+        v.addSpacing(6)
+        v.addWidget(label("Add a long video. MyClip finds the best moments and cuts them into shorts.", "lead"))
+        v.addSpacing(24)
 
         self.drop = DropZone()
+        self.drop.setMinimumHeight(196)
         self.drop.clicked.connect(self.browse)
         v.addWidget(self.drop)
         v.addSpacing(10)
@@ -185,7 +221,7 @@ class MainWindow(QMainWindow):
         self.url.editingFinished.connect(lambda: self.url.text().strip() and self._set_source(self.url.text()))
         row.addWidget(self.url, 1)
         self.gen_btn = button("Generate clips", "primary", on=self.generate)
-        self.gen_btn.setMinimumHeight(38)
+        self.gen_btn.setMinimumHeight(42)
         self.gen_btn.setToolTip("Ctrl+Enter")
         row.addWidget(self.gen_btn)
         v.addLayout(row)
@@ -215,24 +251,41 @@ class MainWindow(QMainWindow):
         ov.addWidget(self.preset_chips)
         ov.addSpacing(24)
 
-        # main options grid
-        grid = QGridLayout(); grid.setHorizontalSpacing(36); grid.setVerticalSpacing(22)
+        # main options: a card, with the live caption preview on the right
+        card = QFrame(); card.setObjectName("panel")
+        cl = QHBoxLayout(card); cl.setContentsMargins(24, 22, 24, 22); cl.setSpacing(28)
+        left = QVBoxLayout(); left.setSpacing(0)
+        grid = QGridLayout(); grid.setHorizontalSpacing(28); grid.setVerticalSpacing(20)
         self.count = Chips([(c, str(c)) for c in COUNTS])
         self.length = Chips(LENGTHS)
         self.aspect = Chips(ASPECT_OPTS)
         self.captions = Chips(list(CAPTION_STYLES) + ["Off"])
         self.cap_lang = Chips(SUB_MODES)
+        self.hook_opt = Chips([(True, "On", "Big AI-written line at the top for the first seconds"), (False, "Off")],
+                              wrap=False)
+        self.bleep_opt = Chips([("off", "Off"), ("beep", "Beep", "A beep over swear words"),
+                                ("mute", "Mute", "Silence over swear words")], wrap=False)
         self.captions.changed.connect(lambda v: self.cap_lang.setEnabled(v != "Off"))
         grid.addWidget(Field("Number of clips", self.count), 0, 0, 1, 2)
         grid.addWidget(Field("Length", self.length), 1, 0)
         grid.addWidget(Field("Format", self.aspect), 1, 1)
         grid.addWidget(Field("Captions", self.captions), 2, 0)
         grid.addWidget(Field("Subtitle language", self.cap_lang,
-                             "Auto: Hindi becomes Hinglish (“ye kya ho gaya”), English stays English, and a word "
-                             "from another language gets its meaning in brackets, like “gracias (thanks)”. "
-                             "Brackets need an AI model."), 2, 1)
+                             "Auto: Hindi becomes Hinglish, English stays English, other languages get (meaning)."), 2, 1)
+        grid.addWidget(Field("Hook text", self.hook_opt), 3, 0)
+        grid.addWidget(Field("Bleep swear words", self.bleep_opt), 3, 1)
         grid.setColumnStretch(0, 1); grid.setColumnStretch(1, 1)
-        ov.addLayout(grid)
+        left.addLayout(grid)
+        cl.addLayout(left, 1)
+        pcol = QVBoxLayout(); pcol.setSpacing(8)
+        self.preview = CaptionPreview(); self.preview.setFixedSize(236, 420)
+        pcol.addWidget(self.preview, 0, Qt.AlignmentFlag.AlignTop)
+        pcol.addWidget(label("Preview", "faint"), 0, Qt.AlignmentFlag.AlignHCenter)
+        pcol.addStretch(1)
+        cl.addLayout(pcol)
+        ov.addWidget(card)
+        ov.addSpacing(6)
+        ov_inner = left
         self.len_row = QWidget()
         lr = QHBoxLayout(self.len_row); lr.setContentsMargins(0, 12, 0, 0); lr.setSpacing(8)
         self.len_min = QSpinBox(); self.len_min.setRange(5, 595); self.len_min.setSuffix(" s"); self.len_min.setValue(20)
@@ -244,7 +297,7 @@ class MainWindow(QMainWindow):
         lr.addWidget(label("to", "muted")); lr.addWidget(self.len_max)
         self.len_hint = label("", "faint"); lr.addSpacing(8); lr.addWidget(self.len_hint)
         lr.addStretch(1)
-        ov.addWidget(self.len_row)
+        ov_inner.addWidget(self.len_row)
         self.len_min.valueChanged.connect(self._len_min_changed)
         self.len_max.valueChanged.connect(self._len_max_changed)
         self.length.changed.connect(lambda v: (self.len_row.setVisible(v == "custom"), self._len_hint()))
@@ -254,7 +307,8 @@ class MainWindow(QMainWindow):
         self.ch = QSpinBox(); self.ch.setRange(240, 4096); self.ch.setSingleStep(2); self.ch.setValue(1920)
         cr.addWidget(label("Size", "muted")); cr.addWidget(self.cw); cr.addWidget(label("×", "faint")); cr.addWidget(self.ch)
         cr.addStretch(1)
-        ov.addWidget(self.custom_row)
+        ov_inner.addWidget(self.custom_row)
+        ov_inner.addStretch(1)
         self.aspect.changed.connect(lambda a: self.custom_row.setVisible(a == "Custom"))
         ov.addSpacing(26)
 
@@ -326,7 +380,17 @@ class MainWindow(QMainWindow):
         ag.addWidget(Field("Caption accuracy", self.cap_quality,
                            "Best listens to each chosen clip again with Whisper large-v3. Adds about a minute "
                            "on a GPU, a few on a CPU."), 3, 0)
-        ag.addWidget(Field("Save to", out_row), 4, 0, 1, 2)
+        self.helper_opts: dict = {}
+        r_ = 4
+        for k, (key, hid, name, tip) in enumerate(HELPER_TOGGLES):
+            ch_ = Chips(ONOFF, wrap=False)
+            self.helper_opts[key] = (ch_, hid)
+            f_ = Field(name, ch_, tip)
+            f_.hint_lbl = f_.findChildren(QLabel)[-1]
+            ag.addWidget(f_, r_ + k // 2, k % 2)
+            self.helper_opts[key] = (ch_, hid, f_)
+        r_ += (len(HELPER_TOGGLES) + 1) // 2
+        ag.addWidget(Field("Save to", out_row), r_, 0, 1, 2)
         ag.setColumnStretch(0, 1); ag.setColumnStretch(1, 1)
         ov.addWidget(self.adv)
         self.adv.setVisible(False)
@@ -362,6 +426,8 @@ class MainWindow(QMainWindow):
         self.results_head = QWidget()
         rh = QHBoxLayout(self.results_head); rh.setContentsMargins(0, 26, 0, 12)
         self.results_title = label("", "h2"); rh.addWidget(self.results_title); rh.addStretch(1)
+        self.results_best = button("Best of", "ghost", "film", "Combine the top clips into one 60-second video")
+        rh.addWidget(self.results_best)
         self.results_upload = button("Upload all", "ghost", "upload", "Upload these clips to YouTube")
         rh.addWidget(self.results_upload)
         self.results_open = button("Open folder", "ghost", "folder")
@@ -370,17 +436,20 @@ class MainWindow(QMainWindow):
         self.used_lbl = label("", "faint", wrap=True)
         v.addWidget(self.used_lbl)
         v.addSpacing(10)
-        self.results = QWidget()
-        self.results_grid = QGridLayout(self.results); self.results_grid.setContentsMargins(0, 0, 0, 0)
-        self.results_grid.setSpacing(14)
-        self.results_grid.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.results = ClipGrid(self.toast_text, self._upload)
+        self.results.open_clip.connect(self._open_clip)
         v.addWidget(self.results)
+        self.results.hide()
+        self.results_folder = ""
         self.results_head.hide(); self.used_lbl.hide()
         v.addStretch(1)
 
         for chips in (self.count, self.length, self.aspect, self.captions, self.cap_lang, self.whisper, self.framing,
-                      self.quality, self.device, self.external, self.scenes, self.cap_quality):
+                      self.quality, self.device, self.external, self.scenes, self.cap_quality, self.hook_opt,
+                      self.bleep_opt, *[t[0] for t in self.helper_opts.values()]):
             chips.changed.connect(self._options_changed)
+        for chips in (self.captions, self.cap_lang, self.aspect, self.framing, self.hook_opt):
+            chips.changed.connect(lambda *_: self._update_preview())
         self.create_scroll = scroll(page)
         return self.create_scroll
 
@@ -434,15 +503,25 @@ class MainWindow(QMainWindow):
         n = self.count.value() or 8
         parts = [f"{n} clip{'s' if n != 1 else ''}", f"{fmt(mn)}–{fmt(mx)}", aspect,
                  "No captions" if caps == "Off" else f"{caps} captions · {sub} subtitles", ai]
+        if self.hook_opt.value() is not False:
+            parts.append("Hook")
+        if (self.bleep_opt.value() or "off") != "off":
+            parts.append("Bleep")
+        if (self.framing.value() or "") == "Facecam":
+            parts.append("Facecam")
         return "   ·   ".join(parts)
 
     def _collapse_options(self, collapse: bool, scroll: bool = False) -> None:
         if collapse:
             self.summary_lbl.setText(self._settings_summary())
-        self.options_box.setVisible(not collapse)
+        if collapse == (not self.options_box.isVisible()):
+            self.summary_bar.setVisible(collapse)
+            return
+        anim.collapse(self.options_box, not collapse, 220,
+                      (lambda: self._scroll_to(self.options_box, 120)) if (scroll and not collapse) else None)
         self.summary_bar.setVisible(collapse)
-        if scroll and not collapse:
-            QTimer.singleShot(40, lambda: self._scroll_to(self.options_box, 120))
+        if collapse:
+            anim.fade_in(self.summary_bar, 160)
 
     def _scroll_to(self, widget: QWidget, above: int = 24) -> None:
         area = getattr(self, "create_scroll", None)
@@ -518,9 +597,10 @@ class MainWindow(QMainWindow):
         self.live_count = label("", "h2"); lh.addWidget(self.live_count); lh.addStretch(1)
         self.live_open = button("Open folder", "ghost", "folder"); lh.addWidget(self.live_open)
         v.addWidget(self.live_head); self.live_head.hide()
-        from .widgets import FlowLayout
-        self.live_grid_w = QWidget(); self.live_grid = FlowLayout(self.live_grid_w, spacing=14)
-        v.addWidget(self.live_grid_w)
+        self.live_grid = ClipGrid(self.toast_text, self._upload, toolbar=False,
+                                  empty_text="Clips appear here as they're made.")
+        self.live_grid.open_clip.connect(self._open_clip)
+        v.addWidget(self.live_grid)
         v.addSpacing(20)
         v.addWidget(label("Only clip streams you're allowed to repost. Expect a delay of a few seconds behind live.",
                           "faint", wrap=True))
@@ -545,10 +625,7 @@ class MainWindow(QMainWindow):
         self.qs.setValue("live/url", url); self.qs.setValue("live/sens", opts.sensitivity)
         self.qs.setValue("live/finish", opts.finish_now)
         self._remember_root(cfg.output_dir)
-        while self.live_grid.count():
-            it = self.live_grid.takeAt(0)
-            if it.widget():
-                it.widget().deleteLater()
+        self.live_grid.set_items([])
         self.live_head.hide()
         self.live_panel.show()
         self.live_state.setText("Connecting"); self.live_info.setText("")
@@ -611,8 +688,7 @@ class MainWindow(QMainWindow):
         except (RuntimeError, TypeError):
             pass
         self.live_open.clicked.connect(lambda: open_path(folder))
-        self.live_grid.addWidget(ClipCard(c, folder, self.toast.show_text))
-        self.live_grid_w.updateGeometry()
+        self.live_grid.add_item(c, folder)
 
     def _live_reset(self) -> None:
         self.live = None
@@ -639,6 +715,164 @@ class MainWindow(QMainWindow):
             return
         self.studio.upload_clips(clips)
 
+    # ================= clips: player, best of, preview =================
+    def toast_text(self, text: str, ms: int = 2600, error: bool = False) -> None:
+        if hasattr(self, "toast"):
+            self.toast.show_text(text, ms, error)
+
+    def _open_clip(self, clip: dict, folder: str, siblings: list) -> None:
+        from .player import open_player
+        open_player(self, clip, folder, siblings, self.toast_text, self._upload, self._job_changed)
+
+    def _job_changed(self, folder: str) -> None:
+        if folder and os.path.normcase(folder) == os.path.normcase(getattr(self, "results_folder", "") or ""):
+            try:
+                clips = editing.load_job(folder).get("clips", [])
+                self.results.set_items([(c, folder) for c in clips], animate=False)
+            except Exception:
+                pass
+        if self.stack.currentIndex() == 2:
+            self._load_library()
+
+    def _best_of(self, folder: str) -> None:
+        try:
+            clips = [c for c in editing.load_job(folder).get("clips", []) if c.get("source") != "compilation"]
+        except Exception as exc:
+            self.toast_text(f"Couldn't read this job: {exc}", 4000, True)
+            return
+        if len(clips) < 2:
+            self.toast_text("A Best of needs at least 2 clips.", 3000, True)
+            return
+        if getattr(self, "_best_worker", None) is not None:
+            self.toast_text("A Best of is already being made.", 3000, True)
+            return
+        from ..core import compile as compmod
+        self.toast_text("Making a Best of from the top clips...", 4000)
+
+        def done(rec) -> None:
+            self._best_worker = None
+            self._job_changed(folder)
+            self.toast_text("Best of is ready")
+
+        def failed(msg: str) -> None:
+            self._best_worker = None
+            self.toast_text(f"Best of failed: {msg}", 5000, True)
+
+        self._best_worker = workers.run_task(self, lambda cancel, prog: compmod.build(folder, clips, cancel, 5, 60.0, prog),
+                                             done, failed)
+
+    def _update_preview(self) -> None:
+        if not hasattr(self, "preview"):
+            return
+        self.preview.set_options(self.captions.value() or "Bold", self.cap_lang.value() or "auto",
+                                 self.aspect.value() or "9:16", self.framing.value() or "Auto",
+                                 self.hook_opt.value() is not False, (self.cw.value(), self.ch.value()))
+
+    def _preview_frame(self, src: str) -> None:
+        if not hasattr(self, "preview"):
+            return
+        if not src or not os.path.isfile(src):
+            self.preview.set_frame(None)
+            return
+        cam = engine.saved_facecam(src)
+
+        def grab(cancel, prog):
+            from ..core import ffmpeg
+            info = ffmpeg.probe(src)
+            return ffmpeg.grab_jpeg(src, max(0.5, info.duration * 0.3), 720, 3)
+
+        workers.run_task(self, grab, lambda b: src == self.source and self.preview.set_frame(b, cam))
+
+    # ================= AI helpers, bleep, motion, learning =================
+    def _ollama_url(self) -> str:
+        c = next((c for c in self.conns.items if c.provider == "Ollama"), None)
+        return c.base_url if c else "http://localhost:11434"
+
+    def _helpers_changed(self) -> None:
+        for key, (ch_, hid, f_) in getattr(self, "helper_opts", {}).items():
+            ok = helpers.installed(hid)
+            ch_.setEnabled(ok)
+            hint = getattr(f_, "hint_lbl", None)
+            if hint is not None:
+                base = dict((k, t) for k, _, _, t in HELPER_TOGGLES).get(key, "")
+                hint.setText(base if ok else "Install it in Settings → AI helpers")
+        if hasattr(self, "helpers_section"):
+            self.helpers_section.refresh()
+
+    def _edit_bleep_words(self) -> None:
+        from .helpers_ui import BleepWordsDialog
+        if BleepWordsDialog(self).exec():
+            self.toast_text("Saved")
+
+    def _set_motion(self, reduce: bool) -> None:
+        theme.REDUCE_MOTION = bool(reduce)
+        self.qs.setValue("reduce_motion", bool(reduce))
+        self._update_preview()
+
+    def _learn_channel(self) -> str:
+        st = getattr(self, "studio", None)
+        if st is None or str(self.qs.value("learn", "true")).lower() != "true":
+            return ""
+        return st.store.active_id if st.store.active else ""
+
+    def _learn_summary(self) -> None:
+        if not hasattr(self, "learn_lbl"):
+            return
+        st = getattr(self, "studio", None)
+        if st is None or not st.store.active:
+            self.learn_lbl.setText("Connect your YouTube channel in Studio to use this.")
+            return
+        from ..core import learning
+        n_all, n_views, w = learning.summary(st.store.active_id)
+        if str(self.qs.value("learn", "true")).lower() != "true":
+            self.learn_lbl.setText("Off. Clips are picked with the default weights.")
+        elif w:
+            ups = sorted(w.items(), key=lambda kv: -kv[1])
+            best = ", ".join(k for k, x in ups[:2] if x > 1.02) or "no clear favourite yet"
+            self.learn_lbl.setText(f"Learned from {n_views} videos. Favours: {best}.")
+        else:
+            need = max(0, 8 - n_views)
+            self.learn_lbl.setText(f"{n_all} uploads remembered, {n_views} with views. "
+                                   + (f"{need} more needed before it starts tuning." if need else "Tuning starts soon."))
+
+    def _refresh_learning(self, quiet: bool = True) -> None:
+        st = getattr(self, "studio", None)
+        if st is None or not st.store.active or str(self.qs.value("learn", "true")).lower() != "true":
+            if not quiet:
+                self.toast_text("Connect your YouTube channel in Studio first.", 3000, True)
+            return
+        if getattr(self, "_learn_worker", None) is not None:
+            return
+        from ..core import youtube
+        cid = st.store.active_id
+
+        def done(res) -> None:
+            self._learn_worker = None
+            self._learn_summary()
+            if not quiet:
+                checked, n = res
+                self.toast_text(f"Checked {checked} video{'s' if checked != 1 else ''}" if checked else
+                                "Nothing new to check yet (videos are checked 48 hours after upload)")
+
+        def failed(msg: str) -> None:
+            self._learn_worker = None
+            if not quiet:
+                self.toast_text(f"Couldn't check views: {msg}", 5000, True)
+
+        self._learn_worker = workers.run_task(self, lambda c, p: youtube.refresh_learning(st.store, cid), done, failed)
+
+    def _reset_learning(self) -> None:
+        st = getattr(self, "studio", None)
+        if st is None or not st.store.active:
+            return
+        if QMessageBox.question(self, "Reset", "Forget what MyClip learned from this channel's views?") \
+                != QMessageBox.StandardButton.Yes:
+            return
+        from ..core import learning
+        learning.reset(st.store.active_id)
+        self._learn_summary()
+        self.toast_text("Reset")
+
     # ================= library =================
     def _library_page(self) -> QWidget:
         page, v = page_container()
@@ -648,7 +882,8 @@ class MainWindow(QMainWindow):
         self.lib_count = label("Everything you've made, newest first.", "muted")
         v.addWidget(self.lib_count)
         v.addSpacing(18)
-        self.lib_search = QLineEdit(); self.lib_search.setPlaceholderText("Search titles, hashtags, links...")
+        self.lib_search = QLineEdit(); self.lib_search.setObjectName("search")
+        self.lib_search.setPlaceholderText("Search titles, hashtags, links...")
         self.lib_search.setClearButtonEnabled(True)
         self._search_timer = QTimer(self, singleShot=True, interval=250, timeout=lambda: self._render_library(reset=True))
         self.lib_search.textChanged.connect(lambda _: self._search_timer.start())
@@ -693,8 +928,9 @@ class MainWindow(QMainWindow):
         self.lib_count.setText(f"{len(self.lib_items)} videos  ·  {total_clips} clips" if self.lib_items
                                else "Everything you've made, newest first.")
         if not items:
-            self.lib_box.addWidget(label("No matches." if q.strip() else
-                                         "Nothing here yet. Clips you generate will show up here.", "muted"))
+            from .widgets import empty_state
+            self.lib_box.addWidget(empty_state("library", "No matches." if q.strip() else
+                                               "Nothing here yet. Clips you generate will show up here."))
             self.lib_more.hide()
             return
         page = items[self.lib_shown:self.lib_shown + 20]
@@ -709,6 +945,8 @@ class MainWindow(QMainWindow):
             lib_ups = [{"path": os.path.join(d["folder"], c.get("file", "")), "title": c.get("title", ""),
                         "description": c.get("description", ""), "hashtags": c.get("hashtags") or []}
                        for c in sorted(d.get("clips", []), key=lambda c: -(c.get("score") or 0))]
+            hh.addWidget(button("Best of", "ghost", "film", "Combine the top clips into one 60-second video",
+                                on=lambda _, f=d["folder"]: self._best_of(f)))
             hh.addWidget(button("Upload all", "ghost", tip="Upload these clips to YouTube",
                                 on=lambda _, u=lib_ups: self._upload(u)))
             hh.addWidget(button("Clip again", "ghost", tip="Load this video and its settings",
@@ -717,10 +955,10 @@ class MainWindow(QMainWindow):
             hh.addWidget(button("Delete", "ghost", tip="Delete these clips from disk",
                                 on=lambda _, d=d, b=block: self.delete_job(d, b)))
             bv.addLayout(hh)
-            grid = QWidget(); fl = FlowLayout(grid, spacing=14)
-            clips = sorted(d.get("clips", []), key=lambda c: -(c.get("score") or 0))
-            for c in clips:
-                fl.addWidget(ClipCard(c, d["folder"], self.toast.show_text))
+            grid = ClipGrid(self.toast_text, self._upload, toolbar=False)
+            grid.open_clip.connect(self._open_clip)
+            grid.changed.connect(self._load_library)
+            grid.set_items([(c, d["folder"]) for c in d.get("clips", [])], animate=False)
             bv.addWidget(grid)
             self.lib_box.addWidget(block)
         self.lib_shown += len(page)
@@ -736,7 +974,8 @@ class MainWindow(QMainWindow):
         pairs = {"clip_count": self.count, "aspect": self.aspect, "captions": self.captions, "caption_lang": self.cap_lang,
                  "framing": self.framing, "quality": self.quality, "whisper_model": self.whisper,
                  "device": self.device, "use_external": self.external, "use_scenes": self.scenes,
-                 "caption_quality": self.cap_quality}
+                 "caption_quality": self.cap_quality, "hook_text": self.hook_opt, "bleep": self.bleep_opt,
+                 **{k: t[0] for k, t in self.helper_opts.items()}}
         for k, chips in pairs.items():
             if k in s:
                 chips.set_value(min(10, max(1, int(s[k]))) if k == "clip_count" else s[k])
@@ -793,6 +1032,39 @@ class MainWindow(QMainWindow):
                 btn.setIcon(_swatch(hx)); btn.setIconSize(QSize(10, 10))
         self.accent_chips.changed.connect(self.apply_accent)
         v.addWidget(Field("Accent color", self.accent_chips, "Used for buttons, selections, progress and the active page."))
+        v.addSpacing(16)
+        self.motion_opt = Chips([(False, "Animations on"), (True, "Reduce motion")], wrap=False)
+        self.motion_opt.set_value(str(self.qs.value("reduce_motion", "false")).lower() == "true")
+        self.motion_opt.changed.connect(self._set_motion)
+        v.addWidget(Field("Motion", self.motion_opt, "Turns off fades, slides and the moving previews."))
+        v.addSpacing(32)
+        from .helpers_ui import HelpersSection
+        v.addWidget(label("AI HELPERS", "section")); v.addSpacing(10)
+        self.helpers_section = HelpersSection(self.toast_text, self._ollama_url, self._helpers_changed)
+        v.addWidget(self.helpers_section)
+        v.addSpacing(32)
+        v.addWidget(label("CLIPS", "section")); v.addSpacing(10)
+        crow = QHBoxLayout(); crow.setSpacing(8)
+        crow.addWidget(button("Words to bleep", ic="edit", on=self._edit_bleep_words))
+        crow.addStretch(1)
+        v.addLayout(crow)
+        v.addSpacing(6)
+        v.addWidget(label("Hindi and English swear words, in English letters and Hindi script. Used when "
+                          "Bleep swear words is on.", "faint", wrap=True))
+        v.addSpacing(32)
+        v.addWidget(label("LEARN FROM YOUR VIEWS", "section")); v.addSpacing(10)
+        self.learn_opt = Chips([(True, "On"), (False, "Off")], wrap=False)
+        self.learn_opt.set_value(str(self.qs.value("learn", "true")).lower() == "true")
+        self.learn_opt.changed.connect(lambda v_: (self.qs.setValue("learn", v_), self._learn_summary()))
+        v.addWidget(Field("Tune clip picking with my YouTube views", self.learn_opt,
+                          "After 48 hours MyClip checks how your uploaded Shorts did. Once 8 have views, it gently "
+                          "favours the kind of moments that got watched. Each signal moves at most 40 %."))
+        v.addSpacing(10)
+        lrow = QHBoxLayout(); lrow.setSpacing(8)
+        self.learn_lbl = label("", "muted", wrap=True); lrow.addWidget(self.learn_lbl, 1)
+        lrow.addWidget(button("Check views now", "ghost", on=lambda: self._refresh_learning(quiet=False)))
+        lrow.addWidget(button("Reset", "ghost", on=self._reset_learning))
+        v.addLayout(lrow)
         v.addSpacing(32)
         v.addWidget(label("CONNECTIONS", "section")); v.addSpacing(10)
         v.addWidget(label("AI providers you've added. Click one on the Create page to switch.", "muted"))
@@ -812,12 +1084,48 @@ class MainWindow(QMainWindow):
         self.sys_lbl = label("", "muted", wrap=True)
         self.sys_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         v.addWidget(self.sys_lbl)
+        v.addSpacing(12)
+        srow = QHBoxLayout(); srow.setSpacing(8)
+        srow.addWidget(button("Add to Desktop and Start menu", on=self.make_shortcuts))
+        srow.addWidget(button("Open log", "ghost", tip="What happened behind the scenes, for troubleshooting",
+                              on=self.open_log))
+        srow.addStretch(1)
+        v.addLayout(srow)
         v.addSpacing(32)
         v.addWidget(label("SHORTCUTS", "section")); v.addSpacing(10)
         v.addWidget(label("Ctrl+O  open file     Ctrl+L  paste link     Ctrl+Enter  generate     Esc  cancel     "
                           "Ctrl+1–5  switch page     Space  clip now (Live)", "muted", wrap=True))
         v.addStretch(1)
         return scroll(page)
+
+    def make_shortcuts(self) -> None:
+        import subprocess
+        root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        ps1 = os.path.join(root, "create_shortcuts.ps1")
+        try:
+            r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps1, "-Quiet"],
+                               capture_output=True, text=True, timeout=60,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            ok = r.returncode == 0
+        except Exception as exc:
+            ok, r = False, None
+            print(f"[MyClip] shortcut creation failed: {exc}", flush=True)
+        if ok:
+            self.toast.show_text("Added to your Desktop and Start menu. Right-click it in Start to pin it to the taskbar.",
+                                 5000)
+        else:
+            if r is not None:
+                print(r.stdout, r.stderr, flush=True)
+            self.toast.show_text("Couldn't create the shortcuts. Run \"Create shortcuts.bat\" in the app folder.",
+                                 5000, error=True)
+
+    def open_log(self) -> None:
+        base = os.environ.get("APPDATA") or os.path.join(os.path.expanduser("~"), ".config")
+        p = os.path.join(base, "MyClipAI", "logs", "myclip.log")
+        if os.path.isfile(p):
+            open_path(p)
+        else:
+            self.toast.show_text("No log yet. It's created when you open MyClip from its icon.")
 
     def apply_accent(self, hx: str) -> None:
         """Change the accent everywhere, right away."""
@@ -913,6 +1221,7 @@ class MainWindow(QMainWindow):
             self.toast.show_text("Couldn't find that file or link.", error=True)
             return
         self.source = text
+        self._preview_frame(text)
         w = workers.ProbeWorker(text)
         w.done.connect(self._probed)
         workers.start(self, w, w.done)
@@ -958,7 +1267,8 @@ class MainWindow(QMainWindow):
         setters = {"whisper_model": self.whisper, "device": self.device, "quality": self.quality,
                    "use_external": self.external, "use_scenes": self.scenes, "framing": self.framing,
                    "aspect": self.aspect, "captions": self.captions, "caption_lang": self.cap_lang,
-                   "caption_quality": self.cap_quality,
+                   "caption_quality": self.cap_quality, "hook_text": self.hook_opt, "bleep": self.bleep_opt,
+                   **{k: t[0] for k, t in self.helper_opts.items()},
                    "clip_count": self.count}
         for k, chips in setters.items():
             if k in v:
@@ -1182,7 +1492,10 @@ class MainWindow(QMainWindow):
             connection_id=c.id if c else "", llm_model=c.model if c else "",
             use_external=self.external.value() is not False, use_scenes=self.scenes.value() is not False,
             caption_quality=self.cap_quality.value() or "best",
-            output_dir=self.out_dir.text().strip())
+            output_dir=self.out_dir.text().strip(),
+            hook_text=self.hook_opt.value() is not False, bleep=self.bleep_opt.value() or "off",
+            learn_channel=self._learn_channel(),
+            **{k: t[0].value() is not False for k, t in getattr(self, "helper_opts", {}).items()})
 
     def generate(self) -> None:
         if self.worker or self.live:
@@ -1200,7 +1513,7 @@ class MainWindow(QMainWindow):
         self.steps.reset(); self.steps.set_current(0)
         self.prog_step.setText(f"STEP 1 OF {len(STAGE_NAMES)}")
         self.prog_title.setText(STAGE_LONG["Import"])
-        self.bar.setValue(0); self.prog_pct.setText("0%"); self.prog_msg.setText("Starting...")
+        self.bar.setValue(0); self._pct = 0; self.prog_pct.setText("0%"); self.prog_msg.setText("Starting...")
         self.prog_note.clear(); self.prog_note.hide(); self.prog_time.setText("")
         self.cancel_btn.show(); self.cancel_btn.setEnabled(True)
         self._t0 = time.monotonic(); self._tick.start(); self._update_time()
@@ -1245,8 +1558,10 @@ class MainWindow(QMainWindow):
             self.prog_note.setText(msg); self.prog_note.show()
             return
         pct = engine.overall(stage, frac)
-        if pct >= self.bar.value():
-            self.bar.setValue(pct); self.prog_pct.setText(f"{pct}%")
+        if pct > self._pct:
+            self._pct = pct
+            anim.value(self.bar, b"value", pct, 260)
+            self.prog_pct.setText(f"{pct}%")
         if stage in STAGE_NAMES:
             i = STAGE_NAMES.index(stage)
             if i > self.steps.current:
@@ -1261,7 +1576,7 @@ class MainWindow(QMainWindow):
     def _update_time(self) -> None:
         el = time.monotonic() - getattr(self, "_t0", time.monotonic())
         txt = _clock(el)
-        pct = self.bar.value()
+        pct = getattr(self, "_pct", self.bar.value())
         if 6 <= pct < 100 and el > 20:
             left = el / pct * (100 - pct)
             txt += f"  ·  about {_clock_left(left)} left"
@@ -1278,16 +1593,18 @@ class MainWindow(QMainWindow):
             return
         self._job_done()
         took = time.monotonic() - getattr(self, "_t0", time.monotonic())
-        self.bar.setValue(100); self.prog_pct.setText("100%")
+        self._pct = 100
+        anim.value(self.bar, b"value", 100, 200); self.prog_pct.setText("100%")
         self.steps.set_current(len(STAGE_NAMES))
         self.prog_step.setText("DONE")
         self.prog_title.setText(f"{len(res.clips)} clips ready")
         self.prog_msg.setText("Scroll down to watch, copy or upload them.")
         self.prog_time.setText(f"took {_clock(took)}")
         self.cancel_btn.hide()
-        clips = [{"file": c.file, "thumb": c.thumb, "start": c.start, "end": c.end, "score": c.score,
-                  "signal_score": c.signal_score, "llm_score": c.llm_score, "title": c.title, "reason": c.reason,
-                  "description": c.description, "hashtags": c.hashtags} for c in res.clips]
+        try:
+            clips = editing.load_job(res.folder).get("clips", [])
+        except Exception:
+            clips = [engine.clip_record(c, res.folder) for c in res.clips]
         self._show_results(res.title, res.folder, clips, res.used, res.warnings)
         QTimer.singleShot(80, lambda: self._scroll_to(self.prog_panel, 24))
         QApplication.alert(self)
@@ -1314,10 +1631,9 @@ class MainWindow(QMainWindow):
 
     def _clear_results(self) -> None:
         self.prog_msg.setObjectName("muted"); self.prog_msg.style().unpolish(self.prog_msg); self.prog_msg.style().polish(self.prog_msg)
-        while self.results_grid.count():
-            it = self.results_grid.takeAt(0)
-            if it.widget():
-                it.widget().deleteLater()
+        self.results.set_items([])
+        self.results.hide()
+        self.results_folder = ""
         self.results_head.hide(); self.used_lbl.hide()
 
     def _show_results(self, title: str, folder: str, clips: list[dict], used: list[str], warnings: list[str]) -> None:
@@ -1335,15 +1651,21 @@ class MainWindow(QMainWindow):
                 "title": c.get("title", ""), "description": c.get("description", ""),
                 "hashtags": c.get("hashtags") or []} for c in sorted(clips, key=lambda c: -(c.get("score") or 0))]
         self.results_upload.clicked.connect(lambda: self._upload(ups))
+        try:
+            self.results_best.clicked.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        self.results_best.clicked.connect(lambda: self._best_of(folder))
+        self.results_best.setEnabled(sum(1 for c in clips if c.get("source") != "compilation") >= 2)
+        self.results_folder = folder
         self.results_head.show()
         note = "Used: " + ", ".join(used) if used else ""
         warnings = [w for w in warnings if w != "captions_dropped"]
         if warnings:
             note += ("\n" if note else "") + "  ".join(warnings[:3])
         self.used_lbl.setText(note); self.used_lbl.setVisible(bool(note))
-        cols = max(1, (self.stack.width() - 80) // 240)
-        for i, c in enumerate(sorted(clips, key=lambda c: -(c.get("score") or 0))):
-            self.results_grid.addWidget(ClipCard(c, folder, self.toast.show_text), i // cols, i % cols)
+        self.results.show()
+        self.results.set_items([(c, folder) for c in clips], animate=True)
 
     # ================= persistence =================
     def _save(self) -> None:
@@ -1351,7 +1673,7 @@ class MainWindow(QMainWindow):
             return
         cfg = self._config()
         for k, v in asdict(cfg).items():
-            if k not in ("source", "connection_id", "llm_model"):
+            if k not in ("source", "connection_id", "llm_model", "learn_channel"):
                 self.qs.setValue(f"job/{k}", v)
 
     def _restore(self) -> None:
@@ -1376,6 +1698,11 @@ class MainWindow(QMainWindow):
         self.external.set_value(b("use_external", True))
         self.scenes.set_value(b("use_scenes", True))
         self.cap_quality.set_value(str(g("caption_quality", "best")))
+        self.hook_opt.set_value(b("hook_text", True))
+        self.bleep_opt.set_value(str(g("bleep", "off")))
+        for key, (ch_, hid, f_) in self.helper_opts.items():
+            ch_.set_value(b(key, key != "hindi_asr"))
+        self._helpers_changed()
         i = self.language.findData(str(g("language", "")))
         self.language.setCurrentIndex(max(0, i))
         self.out_dir.setText(str(g("output_dir", "")))
@@ -1389,10 +1716,13 @@ class MainWindow(QMainWindow):
         self.language.currentIndexChanged.connect(self._options_changed)
         self.out_dir.editingFinished.connect(self._save)
         self.cw.valueChanged.connect(self._options_changed); self.ch.valueChanged.connect(self._options_changed)
+        self.cw.valueChanged.connect(lambda _: self._update_preview()); self.ch.valueChanged.connect(lambda _: self._update_preview())
         self._loading = False
 
     def resizeEvent(self, e) -> None:  # noqa: N802
         super().resizeEvent(e)
+        if hasattr(self, "preview"):
+            self.preview.setVisible(self.stack.width() >= 1000)    # keep the options readable on small windows
         if self.toast.isVisible():
             self.toast.move((self.width() - self.toast.width()) // 2, self.height() - self.toast.height() - 28)
 

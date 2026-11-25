@@ -111,3 +111,47 @@ def nvenc_ok() -> bool:
 def time_progress(line: str) -> Optional[float]:
     m = re.search(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)", line)
     return int(m[1]) * 3600 + int(m[2]) * 60 + float(m[3]) if m else None
+
+
+def grab_jpeg(path: str, t: float, width: int = 640, quality: int = 4) -> bytes:
+    """One frame as JPEG bytes (empty bytes if it can't be read)."""
+    try:
+        p = subprocess.run([ffmpeg_path(), "-hide_banner", "-v", "error", "-ss", f"{max(0.0, t):.3f}", "-i", path,
+                            "-frames:v", "1", "-vf", f"scale={int(width)}:-2:flags=lanczos", "-q:v", str(quality),
+                            "-f", "image2pipe", "-c:v", "mjpeg", "pipe:1"],
+                           capture_output=True, stdin=subprocess.DEVNULL, timeout=60, creationflags=NO_WINDOW)
+        return p.stdout or b""
+    except Exception:
+        return b""
+
+
+def raw_frames(path: str, start: float, dur: float, fps: float, w: int, h: int, pix: str = "gray",
+               cancel: Optional[threading.Event] = None):
+    """Frames as a numpy array [n, h, w] (gray) or [n, h, w, 3] (bgr24). Read in chunks so cancel works."""
+    import numpy as np
+    ch = 3 if pix == "bgr24" else 1
+    frame = w * h * ch
+    cmd = [ffmpeg_path(), "-hide_banner", "-v", "error", "-ss", f"{max(0.0, start):.3f}", "-t", f"{max(0.1, dur):.3f}",
+           "-i", path, "-an", "-sn", "-vf", f"fps={fps:.4f},scale={w}:{h}:flags=bilinear,format={pix}",
+           "-f", "rawvideo", "pipe:1"]
+    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            creationflags=NO_WINDOW)
+    chunks: list[bytes] = []
+    try:
+        while True:
+            b = proc.stdout.read(frame * 4)
+            if not b:
+                break
+            chunks.append(b)
+            if cancel is not None and cancel.is_set():
+                raise Cancelled()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+    data = b"".join(chunks)
+    n = len(data) // frame
+    if n == 0:
+        return np.zeros((0, h, w) if ch == 1 else (0, h, w, 3), dtype=np.uint8)
+    arr = np.frombuffer(data[: n * frame], dtype=np.uint8)
+    return arr.reshape((n, h, w) if ch == 1 else (n, h, w, 3))

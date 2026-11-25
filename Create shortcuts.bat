@@ -1,0 +1,4 @@
+@echo off
+cd /d "%~dp0"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0create_shortcuts.ps1"
+pause

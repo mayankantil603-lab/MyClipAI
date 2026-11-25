@@ -1,4 +1,4 @@
-# MyClip AI
+# MyClip AI 2
 
 Turn long videos into short clips. Drop a file or paste a link, press **Generate clips**.
 
@@ -7,17 +7,62 @@ signals when the link has them (YouTube "Most replayed", chat replay, timestampe
 and can ask an AI model to pick and title the best moments. Clips are cut, reframed to your
 format, captioned and saved to `Videos\MyClipAI\Shorts`.
 
+## New in version 2
+
+**Watch and edit inside the app.** Click any clip to open the player:
+- play, seek, previous/next clip (Space, ←/→ 5 s, ↑/↓, Esc)
+- **Trim**: `[` sets the start, `]` the end, *Save trimmed copy*
+- **Captions**: fix any word, merge or split words, *Save and re-make clip* (only that clip is rendered again)
+- **Hook**: change or remove the big line at the top
+- **Facecam**: drag the box onto your camera (or *Find it for me*); remembered for that video
+- **Compare**: the clip heard by Whisper and by the Hindi model side by side; keep the better one
+
+**On the Create page**
+- a live **preview** of your caption style, subtitle language, format and hook on a real frame of your video
+- **Hook text** on/off: a short AI-written line at the top for the first seconds
+- **Bleep swear words**: Off / Beep / Mute (Hindi and English, both scripts; edit the list in Settings)
+- **Framing → Facecam**: your facecam on top, gameplay below, captions at the seam
+
+**Results and Library**: Shorts-style cards with a moving preview on hover, select several to upload or
+delete, sort by score or timeline, filter, and **Best of**: the top 5 moments in one 60-second video.
+
+**AI helpers** (Settings → AI helpers, one click each, all optional):
+| Helper | What it does | Size |
+|---|---|---|
+| Voice cleanup (Demucs) | removes music, gunshots and game sound before captions | ~2.5 GB with NVIDIA, ~300 MB without |
+| Vision | a vision model in Ollama watches the best moments (kills, wins, fails) | none if you have gemma3; else gemma3:4b, 3.3 GB |
+| Face tracking (OpenCV) | the crop follows faces; finds your facecam | ~60 MB |
+| Hindi speech model (AI4Bharat IndicWhisper) | for Hindi captions; also used by Compare | ~780 MB |
+| Sharper thumbnails (Real-ESRGAN) | sharpest frame, upscaled | ~45 MB |
+
+Each helper can be switched off per job under **Advanced**. The *Best quality* preset uses every
+installed helper except the Hindi model, which you turn on yourself after comparing.
+
+**Learn from your views** (Settings): uploads made from Studio are checked 48 hours later. Once 8 have
+views, MyClip gently favours the kinds of moments that got watched on your channel. Each signal can
+move at most 40 %, and *Reset* forgets it.
+
+**Reduce motion** (Settings) turns off fades, slides and moving previews.
+
 ## Setup on Windows (first time)
 
 1. **Install Python 3.11 or 3.12** from python.org. On the first installer screen tick
    **Add python.exe to PATH**.
 2. **Unzip** this folder somewhere, for example `C:\Users\you\MyClipAI`.
-3. **Double-click `run.bat`.** The first start installs everything (a few minutes). Later starts are instant.
+3. **Double-click `run.bat` once.** It installs everything (a few minutes), adds **MyClip AI** to your
+   Desktop and Start menu, and opens the app.
 
-That's it. FFmpeg is included; nothing else to install.
+From then on, open **MyClip AI** from the Desktop icon or the Start menu, like any other app. No black
+window. To pin it: Start → find MyClip AI → right-click → **Pin to taskbar**. Opening it again while it's
+running just brings the window to the front.
+
+Keep the folder where it is: the icons point to it. If you move it, run `Create shortcuts.bat` (or
+Settings → *Add to Desktop and Start menu*). If the app ever won't open from the icon, run `run.bat`
+once: it repairs the setup. Errors are logged to `%APPDATA%\MyClipAI\logs\myclip.log`
+(Settings → *Open log*).
 
 ### Use your NVIDIA GPU (recommended)
-Double-click `install-gpu.bat` once. Transcription then runs on the GPU and uses the
+`run.bat` installs GPU support automatically on NVIDIA PCs. `install-gpu.bat` reinstalls it and runs a GPU test. Transcription then runs on the GPU and uses the
 large-v3-turbo model automatically. If the GPU can't be used, MyClip falls back to the CPU on its own.
 
 ### Add AI (optional)

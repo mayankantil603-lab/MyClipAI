@@ -258,18 +258,39 @@ def _sig(x: float) -> float:
     return 1 / (1 + math.exp(-x))
 
 
+# Per-part multipliers learned from the channel's views (see learning.py). Empty = defaults.
+LEARNED: dict[str, float] = {}
+PARTS = ("peak", "mean", "hook", "payoff", "hype", "speech", "clean", "heat", "chat", "comments", "vision")
+
+
+def score_parts(f: dict) -> dict[str, float]:
+    """The signal score split into named parts (points each part adds before the multipliers)."""
+    p = {
+        "peak": 26 * _sig(f.get("peak", 0) - 1.2),
+        "mean": 12 * _sig(f.get("mean", 0)),
+        "hook": 10 * _sig(f.get("hook", 0) + 0.3),
+        "payoff": 10 * max(0.0, 1 - abs(f.get("peak_pos", 0.5) - 0.68) / 0.68),
+        "hype": 8 * min(f.get("hype", 0), 3) / 3,
+        "speech": 8 * min(f.get("wps", 0) / 2.2, 1.0),
+        "clean": 6 * f.get("starts_clean", 0),
+    }
+    if "heat" in f:
+        p["heat"] = 10 * _sig(f.get("heat", -3) - 0.5)
+    if "chat" in f:
+        p["chat"] = 6 * _sig(f.get("chat", -3) - 0.5)
+    if "comments" in f:
+        p["comments"] = 4 * min(f.get("comments", 0), 2) / 2
+    return p
+
+
+def vision_adjust(score: float, action: float) -> float:
+    """Action 0..10 from the vision model moves the score by up to about +-12 points."""
+    return round(max(0.0, min(100.0, score + 2.4 * (action - 5.0) * LEARNED.get("vision", 1.0))), 1)
+
+
 def signal_score(c: Clip) -> float:
     f = c.features
-    s = 26 * _sig(f.get("peak", 0) - 1.2)
-    s += 12 * _sig(f.get("mean", 0))
-    s += 10 * _sig(f.get("hook", 0) + 0.3)
-    s += 10 * max(0.0, 1 - abs(f.get("peak_pos", 0.5) - 0.68) / 0.68)
-    s += 8 * min(f.get("hype", 0), 3) / 3
-    s += 8 * min(f.get("wps", 0) / 2.2, 1.0)
-    s += 6 * f.get("starts_clean", 0)
-    s += 10 * _sig(f.get("heat", -3) - 0.5) if "heat" in f else 0
-    s += 6 * _sig(f.get("chat", -3) - 0.5) if "chat" in f else 0
-    s += 4 * min(f.get("comments", 0), 2) / 2 if "comments" in f else 0
+    s = sum(v * LEARNED.get(k, 1.0) for k, v in score_parts(f).items())
     if f.get("tail", 0) < -1.0:            # ends in dead air
         s -= 5
     if not ("heat" in f or "chat" in f or "comments" in f):

@@ -360,13 +360,46 @@ def caption_model(choice: str, device_pref: str) -> tuple[str, str, str]:
     return model, ("cuda" if use_cuda else "cpu"), ("float16" if use_cuda else "int8")
 
 
+def clip_window(a: float, b: float) -> tuple[float, float]:
+    """(start, length) of the audio window used for a clip's caption pass."""
+    a0 = max(0.0, a - 1.0)
+    return a0, (b - a) + 2.0
+
+
+def clip_audio(media: str, a: float, b: float, cancel: threading.Event,
+               vocal_file: Optional[str] = None) -> tuple[np.ndarray, float]:
+    """Caption-pass audio for a clip: the voice-only file from voice cleanup when there is one."""
+    a0, length = clip_window(a, b)
+    if vocal_file and os.path.isfile(vocal_file):
+        try:
+            au = decode(vocal_file, 0.0, length, cancel, clean=True)
+            if au.size > SR // 2:
+                return au, a0
+        except Cancelled:
+            raise
+        except Exception as exc:
+            print(f"[MyClip] voice-only audio unreadable, using the original: {exc}", flush=True)
+    return decode(media, a0, length, cancel, clean=True), a0
+
+
+def english_segments(audio: np.ndarray, a0: float, choice: str, device_pref: str,
+                     cancel: threading.Event) -> list[Segment]:
+    """The same audio heard as English (used to keep English words in Hindi speech)."""
+    model, device, ctype = caption_model(choice, device_pref)
+    m, _, _ = _load_or_cpu(model, device, ctype, "medium", cancel)
+    segs, _ = _run(m, audio, "en", cancel, None, a0)
+    return segs
+
+
 def transcribe_clip(media: str, a: float, b: float, choice: str, device_pref: str, language: str,
-                    cancel: threading.Event, prompt: Optional[str] = None) -> tuple[list[Segment], str, str]:
+                    cancel: threading.Event, prompt: Optional[str] = None,
+                    audio: Optional[np.ndarray] = None, a0: Optional[float] = None
+                    ) -> tuple[list[Segment], str, str]:
     """One clip, most accurate settings. Returns (segments in video time, description, language)."""
     register_cuda_dlls()
     model, device, ctype = caption_model(choice, device_pref)
-    a0 = max(0.0, a - 1.0)
-    audio = decode(media, a0, (b - a) + 2.0, cancel, clean=True)
+    if audio is None or a0 is None:
+        audio, a0 = clip_audio(media, a, b, cancel)
     if audio.size < SR // 2:
         return [], f"Whisper {model}", norm_lang(language)
     m, model, device = _load_or_cpu(model, device, ctype, "medium", cancel)

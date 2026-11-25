@@ -432,20 +432,51 @@ class Toast(QLabel):
         self._t = QTimer(self, singleShot=True, timeout=self.hide)
 
     def _style(self, error: bool) -> None:
-        edge = theme.RED if error else theme.ACCENT
-        self.setStyleSheet(f"background: {theme.SURFACE_2}; border: 1px solid {theme.BORDER_HI};"
-                           f"border-left: 3px solid {edge}; border-radius: 7px; padding: 9px 15px;"
+        dot = theme.RED if error else theme.ACCENT
+        self._dot = dot
+        self.setStyleSheet(f"background: {theme.SURFACE_3}; border: 1px solid {theme.BORDER_HI};"
+                           f"border-radius: 19px; padding: 9px 18px 9px 30px;"
                            f"color: {theme.RED if error else theme.TEXT};")
+
+    def paintEvent(self, e) -> None:  # noqa: N802
+        super().paintEvent(e)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(getattr(self, "_dot", theme.ACCENT)))
+        p.drawEllipse(QPointF(16, self.height() / 2), 4, 4)
+        p.end()
 
     def show_text(self, text: str, ms: int = 2600, error: bool = False) -> None:
         self.setText(text)
         self._style(error)
         self.adjustSize()
         pw = self.parentWidget()
-        self.move((pw.width() - self.width()) // 2, pw.height() - self.height() - 28)
+        from PySide6.QtCore import QPoint
+        end = QPoint((pw.width() - self.width()) // 2, pw.height() - self.height() - 30)
         self.raise_()
         self.show()
+        from . import anim
+        anim.slide_up(self, end)
         self._t.start(ms)
+
+
+def empty_state(icon_name: str, text: str) -> QWidget:
+    """A quiet line icon and one sentence, for empty lists."""
+    w = QWidget()
+    lay = QVBoxLayout(w)
+    lay.setContentsMargins(0, 28, 0, 28)
+    lay.setSpacing(10)
+    ic = QLabel()
+    ic.setPixmap(pixmap(icon_name, theme.TEXT_3, 28))
+    ic.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    t = QLabel(text)
+    t.setObjectName("empty")
+    t.setWordWrap(True)
+    t.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    lay.addWidget(ic)
+    lay.addWidget(t)
+    return w
 
 
 class Steps(QWidget):

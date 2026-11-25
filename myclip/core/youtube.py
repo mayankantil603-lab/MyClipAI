@@ -346,6 +346,14 @@ class YouTube:
         order = {v: i for i, v in enumerate(ids)}
         return sorted(vids, key=lambda v: order.get(v["id"], 0))
 
+    def view_counts(self, video_ids: list[str]) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for k in range(0, len(video_ids), 50):
+            r = self.req("GET", f"{API}/videos", params={"part": "statistics", "id": ",".join(video_ids[k:k + 50])})
+            for v in r.json().get("items", []):
+                out[v["id"]] = int((v.get("statistics") or {}).get("viewCount", 0) or 0)
+        return out
+
     def comments(self, limit: int = 30) -> list[dict]:
         r = self.req("GET", f"{API}/commentThreads", params={"part": "snippet", "allThreadsRelatedToChannelId": self.cid,
                                                              "maxResults": min(100, limit), "order": "time",
@@ -629,8 +637,27 @@ def process(item: UploadItem, store: YouTubeStore, queue: UploadQueue,
         queue.set(item, status="failed", error=str(e))
         return
     queue.set(item, status="done", progress=1.0, video_id=vid, session_url="")
+    try:                                             # remember it so the views can teach the scoring
+        from .learning import mark_uploaded
+        mark_uploaded(item.file, cid, vid)
+    except Exception as exc:
+        print(f"[MyClip] couldn't link the upload for learning: {exc}", flush=True)
     if item.thumbnail and os.path.isfile(item.thumbnail):
         try:
             yt.set_thumbnail(vid, item.thumbnail)
         except Exception as exc:
             queue.set(item, error=f"Uploaded, but the thumbnail wasn't set: {exc}")
+
+
+def refresh_learning(store: YouTubeStore, channel_id: str, session=requests) -> tuple[int, int]:
+    """Fetch views for uploads that are 48 h or older and refit. Returns (checked, videos with views)."""
+    from . import learning
+    ids = learning.due(channel_id)
+    if not ids:
+        n_all, n_views, _ = learning.summary(channel_id)
+        return 0, n_views
+    views = YouTube(store, channel_id, session).view_counts(ids)
+    missing = [v for v in ids if v not in views]          # deleted or private: keep, try again later
+    learning.update_views(channel_id, views)
+    _, n_views, _ = learning.summary(channel_id)
+    return len(views), n_views

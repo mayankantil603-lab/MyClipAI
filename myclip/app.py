@@ -31,7 +31,57 @@ def main() -> int:
         QMessageBox.critical(None, "MyClip AI", f"Unexpected error:\n{ev}")
 
     sys.excepthook = hook
+
+    # one window only: opening the icon again brings the running app to the front
+    from PySide6.QtNetwork import QLocalServer, QLocalSocket
+    key = "MyClipAI-" + (os.environ.get("USERNAME") or os.environ.get("USER") or "user")
+    probe = QLocalSocket()
+    probe.connectToServer(key)
+    if probe.waitForConnected(300):
+        probe.write(b"show")
+        probe.flush()
+        probe.waitForBytesWritten(300)
+        probe.disconnectFromServer()
+        return 0
+    QLocalServer.removeServer(key)                  # left over from a crash
+    server = QLocalServer()
+    server.listen(key)
+
+    from PySide6.QtGui import QIcon
+    ico = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "myclip.ico")
+    if os.path.isfile(ico):
+        app.setWindowIcon(QIcon(ico))
+
     from .ui.main_window import MainWindow
     w = MainWindow()
+
+    def bring_front() -> None:
+        while server.hasPendingConnections():
+            c = server.nextPendingConnection()
+            c.disconnectFromServer()
+        if w.isMinimized():
+            w.showNormal()
+        w.show()
+        w.raise_()
+        w.activateWindow()
+
+    server.newConnection.connect(bring_front)
     w.show()
+    _update_downloader_later()
     return app.exec()
+
+
+def _update_downloader_later() -> None:
+    """Keep yt-dlp current (sites change often). Once a day, in the background, no window."""
+    import threading
+
+    def run() -> None:
+        try:
+            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            sys.path.insert(0, root)
+            import update_tools
+            update_tools.main()
+        except Exception:
+            traceback.print_exc()
+
+    threading.Thread(target=run, daemon=True, name="yt-dlp-update").start()
